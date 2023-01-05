@@ -2,11 +2,14 @@ from __future__ import annotations
 import random
 import typing
 import time
+import termplotlib as tpl # type: ignore
+
 
 from typing import List, Tuple, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 from abc import ABC, abstractmethod
+from collections import defaultdict
 
 class Season(Enum):
     Spring = 1
@@ -153,6 +156,17 @@ class Hand:
     skrrt: int = 0
     swap: int = 0
 
+    def list_cards(self) -> List[Card]:
+        cards = []
+        if self.needle:
+            cards.append(Card.Needle)
+        cards.extend(Card.Hay for _ in range(self.hay))
+        cards.extend(Card.Yeet for _ in range(self.yeet))
+        cards.extend(Card.No for _ in range(self.no))
+        cards.extend(Card.Skrrt for _ in range(self.skrrt))
+        cards.extend(Card.Swap for _ in range(self.swap))
+        return cards
+
     def take_card(self, card: Card):
         if card == Card.Needle:
             self.needle = True
@@ -192,14 +206,7 @@ class Hand:
             assert False
 
     def drop_random(self) -> Optional[Card]:
-        cards = []
-        if self.needle:
-            cards.append(Card.Needle)
-        cards.extend(Card.Hay for _ in range(self.hay))
-        cards.extend(Card.Yeet for _ in range(self.yeet))
-        cards.extend(Card.No for _ in range(self.no))
-        cards.extend(Card.Skrrt for _ in range(self.skrrt))
-        cards.extend(Card.Swap for _ in range(self.swap))
+        cards = self.list_cards()
         if not cards:
             return None
         return random.choice(cards)
@@ -229,6 +236,11 @@ class Hand:
 
 class Strategy(ABC):
 
+    @staticmethod
+    @abstractmethod
+    def name() -> str:
+        pass
+
     @abstractmethod
     def best_action(self, player: Player, season: Season, other_players: List[Player]) -> Action:
         pass
@@ -253,7 +265,57 @@ class Strategy(ABC):
     def select_card_to_drop(self, player: Player, other_players: List[Player]) -> Card:
         pass
 
+class RandomStrategy(Strategy):
+    @staticmethod
+    def name() -> str:
+        return "random"
+
+    def best_action(self, player: Player, season: Season, other_players: List[Player]) -> Action:
+        availabe_actions = player.hand.available_actions(season)
+        action = random.choice(availabe_actions)
+
+        if action == ActionKind.BuySheep:
+            return BuySheepAction()
+        elif action in [ActionKind.PlayYeet, ActionKind.PlaySkrrt, ActionKind.PlaySwap]:
+            target = random.choice(other_players)
+            return TargetedAction.make(action, target)
+        else:
+            return Action.argless_action(action)
+
+    # This will only get called during Spring when other player is buying sheep
+    def chose_buy_sheep_reaction(self, player: Player) -> Action:
+        if player.hand.skrrt > 0 and random.random() < 0.5:
+            return SkrrtAction(player)
+        else:
+            return PassAction()
+
+    def chose_yeet_reaction(self, player: Player, aggressor: Player) -> Action:
+        if player.hand.yeet > 0 and random.random() < 0.5:
+            return YeetAction(aggressor)
+        else:
+            return PassAction()
+
+    def maybe_autumn_card_swap(self, player: Player, state: GameState) -> Optional[AutumnSwapAction]:
+        if random.random() < 0.5:
+            other_players = state.other_players(player.idx)
+            target = random.choice(other_players)
+            return AutumnSwapAction(target)
+        else:
+            return None
+
+    def play_no(self, player: Player, action: TargetedAction, current_result: bool) -> bool:
+        if player.hand.no > 0 and random.random() < 0.5:
+            return True
+        else:
+            return False
+
+    def select_card_to_drop(self, player: Player, other_players: List[Player]) -> Card:
+        return random.choice(player.hand.list_cards())
+
 class BasicStrategy(Strategy):
+    @staticmethod
+    def name() -> str:
+        return "basic"
 
     def best_action(self, player: Player, season: Season, other_players: List[Player]) -> Action:
         actions = player.hand.available_actions(season)
@@ -405,7 +467,7 @@ def do_season(state: GameState):
                 action = player.play_best_action(state.season, other_players)
                 if action.kind == ActionKind.Pass:
                     break
-                print(f"{player.name} played {action}. Resulting hand: {player.hand}")
+                # print(f"{player.name} played {action}. Resulting hand: {player.hand}")
 
                 if action.kind == ActionKind.BuySheep:
                     player.buy_sheep()
@@ -507,12 +569,14 @@ def handle_no_contest(state: GameState, action: TargetedAction) -> bool:
     return result
 
 
-names = ["Jan", "Megie", "Katka", "Tobik"]
-def run(players_n: int):
+def run(player_chars: List[PlayerCharacter]) -> GameStats:
+    player_chars = list(player_chars)
+    random.shuffle(player_chars)
+
     cards = make_card_stack()
     players = []
-    for player_idx in range(players_n):
-        player = Player(idx = player_idx, name=names[player_idx], strategy=BasicStrategy())
+    for player_idx, character in enumerate(player_chars):
+        player = Player(idx = player_idx, name=character.name, strategy=character.strategy)
         for _ in range(4):
             player.hand.take_card(cards.pop())
         players.append(player)
@@ -520,29 +584,85 @@ def run(players_n: int):
     state = GameState(players=players, cards=cards, season=Season.Spring)
 
     for season in (Season.Spring, Season.Summer, Season.Autumn):
-        print(f"------------ {season} ------------")
+        # print(f"------------ {season} ------------")
         state.season = season
         do_season(state)
 
         # Check winning conditions
         for player in state.players:
             if player.hand.needle and player.sheep >= 4:
-                print(f"Player {player.name} (idx={player.idx}) is the Winner!")
-                break
+                # print(f"Player {player.name} (idx={player.idx}) is the Winner!")
+                return GameStats(
+                    winner_idx=player.idx,
+                    winner=player_chars[player.idx],
+                    reached_season=season
+                )
         else:
             state.cards = make_residual_deck(state.players)
             continue
         break
     else:
         pass
-        print("💀💀💀 Everybody died  💀💀💀")
+        # print("💀💀💀 Everybody died  💀💀💀")
 
-    print(f"Final standings {state.players}")
+    return GameStats(winner_idx=None, winner=None, reached_season=Season.Winter)
 
+@dataclass
+class GameStats:
+    winner_idx: Optional[int]
+    winner: Optional[PlayerCharacter]
+    reached_season: Season
+
+@dataclass
+class PlayerCharacter:
+    name: str
+    strategy: Strategy
+
+def plot_stats(players_n: int, stats: List[GameStats]):
+    winners = [0] * players_n
+    seasons = [0] * 4
+    strategies = defaultdict(int)
+    for stat in stats:
+        if stat.winner_idx is not None:
+            winners[stat.winner_idx] += 1
+        if stat.winner is not None:
+            strategies[stat.winner.strategy.name()] += 1
+        seasons[stat.reached_season.value - 1] += 1
+
+    print("Winners index distribution")
+    fig = tpl.figure()
+    fig.barh(winners, list(range(players_n)), force_ascii=True)
+    fig.show()
+
+    print("Reached season distribution")
+    fig = tpl.figure()
+    fig.barh(seasons, ["Spring", "Summer", "Autumn", "Winter"], force_ascii=True)
+    fig.show()
+
+    print("Winning strategies:")
+    fig = tpl.figure()
+    fig.barh([
+            strategies["random"],
+            strategies["basic"] / 3
+        ], [
+            "random", "basic"
+        ], force_ascii=True)
+    fig.show()
 
 t = time.time()
-for i in range(100000):
-    run(4)
-    break
+stats = []
+players = [
+    PlayerCharacter("Jan", BasicStrategy()),
+    PlayerCharacter("Katka", BasicStrategy()),
+    PlayerCharacter("Tobik", RandomStrategy()),
+    PlayerCharacter("Megie", BasicStrategy()),
+    # PlayerCharacter("Bagr", RandomStrategy()),
+    # PlayerCharacter("Lol", RandomStrategy()),
+]
+for i in range(10000):
+    stats.append(run(players))
     if (i + 1) % 1000 == 0:
-        print(f"Current speed {i / (time.time() - t)} games/s")
+        print(f"Game no. {i}, current speed {i / (time.time() - t)} games/s")
+plot_stats(len(players), stats)
+
+
